@@ -25,6 +25,7 @@ using namespace facebook::react;
 @implementation RCTDeviceInfo {
   UIInterfaceOrientation _currentInterfaceOrientation;
   NSDictionary *_currentInterfaceDimensions;
+  BOOL _isFullscreen;
 }
 
 @synthesize moduleRegistry = _moduleRegistry;
@@ -43,8 +44,8 @@ RCT_EXPORT_MODULE()
 
 - (void)setModuleRegistry:(RCTModuleRegistry *)moduleRegistry
 {
-  _moduleRegistry = moduleRegistry;
-  [[NSNotificationCenter defaultCenter] addObserver:self
+_moduleRegistry = moduleRegistry;
+[[NSNotificationCenter defaultCenter] addObserver:self
                                            selector:@selector(didReceiveNewContentSizeMultiplier)
                                                name:RCTAccessibilityManagerDidUpdateMultiplierNotification
                                              object:[moduleRegistry moduleForName:"AccessibilityManager"]];
@@ -59,7 +60,7 @@ RCT_EXPORT_MODULE()
   _currentInterfaceDimensions = RCTExportedDimensions(_moduleRegistry);
 
   [[NSNotificationCenter defaultCenter] addObserver:self
-                                           selector:@selector(interfaceFrameDidChange)
+                                           selector:@selector(interfaceOrientationDidChange)
                                                name:UIApplicationDidBecomeActiveNotification
                                              object:nil];
 
@@ -131,6 +132,7 @@ static NSDictionary *RCTExportedDimensions(RCTModuleRegistry *moduleRegistry)
 {
   __block NSDictionary<NSString *, id> *constants;
   RCTModuleRegistry *moduleRegistry = _moduleRegistry;
+  
   RCTUnsafeExecuteOnMainQueueSync(^{
     constants = @{
       @"Dimensions" : RCTExportedDimensions(moduleRegistry),
@@ -169,20 +171,35 @@ static NSDictionary *RCTExportedDimensions(RCTModuleRegistry *moduleRegistry)
 - (void)_interfaceOrientationDidChange
 {
   UIInterfaceOrientation nextOrientation = [RCTSharedApplication() statusBarOrientation];
+  UIApplicationState appState = [RCTSharedApplication() applicationState];
+  BOOL isRunningInFullScreen = CGRectEqualToRect([UIApplication sharedApplication].delegate.window.frame, [UIApplication sharedApplication].delegate.window.screen.bounds);
+    
+  
+  BOOL isActive = appState == UIApplicationStateActive;
+  // We are catching here two situations for multitasking view:
+  // a) The app is in Split View and the container gets resized -> !isRunningInFullScreen
+  // b) The app changes to/from fullscreen example: App runs in slide over mode and goes into fullscreen-> isRunningInFullScreen != _isFullscreen
+  // The above two cases a || b can be shortened to !isRunningInFullScreen || !_isFullscreen;
+  BOOL isResizingOrChangingToFullscreen = !isRunningInFullScreen || !_isFullscreen;
+  BOOL isOrientationChanging = (UIInterfaceOrientationIsPortrait(_currentInterfaceOrientation) &&
+       !UIInterfaceOrientationIsPortrait(nextOrientation)) || (UIInterfaceOrientationIsLandscape(_currentInterfaceOrientation) &&
+       !UIInterfaceOrientationIsLandscape(nextOrientation));
 
   // Update when we go from portrait to landscape, or landscape to portrait
-  if ((UIInterfaceOrientationIsPortrait(_currentInterfaceOrientation) &&
-       !UIInterfaceOrientationIsPortrait(nextOrientation)) ||
-      (UIInterfaceOrientationIsLandscape(_currentInterfaceOrientation) &&
-       !UIInterfaceOrientationIsLandscape(nextOrientation))) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    [[_moduleRegistry moduleForName:"EventDispatcher"] sendDeviceEventWithName:@"didUpdateDimensions"
-                                                                          body:RCTExportedDimensions(_moduleRegistry)];
-#pragma clang diagnostic pop
+  // Also update when the fullscreen state changes (multitasking) and only when the app is in active state.
+  if ((isOrientationChanging || isResizingOrChangingToFullscreen) && isActive) {
+      #pragma clang diagnostic push
+      #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+          [[_moduleRegistry moduleForName:"EventDispatcher"] sendDeviceEventWithName:@"didUpdateDimensions"
+                                                                                body:RCTExportedDimensions(_moduleRegistry)];
+            // We only want to track the current _currentInterfaceOrientation and _isFullscreen only 
+            // when it happens and only when it is published.
+            _currentInterfaceOrientation = nextOrientation;
+            _isFullscreen = isRunningInFullScreen;
+      #pragma clang diagnostic pop
   }
 
-  _currentInterfaceOrientation = nextOrientation;
+  
 }
 
 - (void)interfaceFrameDidChange
@@ -196,16 +213,20 @@ static NSDictionary *RCTExportedDimensions(RCTModuleRegistry *moduleRegistry)
 - (void)_interfaceFrameDidChange
 {
   NSDictionary *nextInterfaceDimensions = RCTExportedDimensions(_moduleRegistry);
-
-  if (!([nextInterfaceDimensions isEqual:_currentInterfaceDimensions])) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    [[_moduleRegistry moduleForName:"EventDispatcher"] sendDeviceEventWithName:@"didUpdateDimensions"
-                                                                          body:nextInterfaceDimensions];
-#pragma clang diagnostic pop
+  UIApplicationState appState = [RCTSharedApplication() applicationState];
+    
+  BOOL isActive = appState == UIApplicationStateActive;
+  // update and publish the even only when the app is in active state
+  if (!([nextInterfaceDimensions isEqual:_currentInterfaceDimensions]) && isActive) {
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        [[_moduleRegistry moduleForName:"EventDispatcher"] sendDeviceEventWithName:@"didUpdateDimensions"
+                                                                              body:nextInterfaceDimensions];
+          // We only want to track the current _currentInterfaceOrientation only 
+          // when it happens and only when it is published.
+          _currentInterfaceDimensions = nextInterfaceDimensions;
+    #pragma clang diagnostic pop
   }
-
-  _currentInterfaceDimensions = nextInterfaceDimensions;
 }
 
 - (std::shared_ptr<TurboModule>)getTurboModule:(const ObjCTurboModule::InitParams &)params
